@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.fireflyframework</groupId>
+        <artifactId>fireflyframework-parent</artifactId>
+        <version>26.10.20</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>io.fireflysoftware</groupId>
+    <artifactId>firefly-parent</artifactId>
+    <version>26.10.6</version>
+    <packaging>pom</packaging>
+
+    <name>Firefly OpenPlatform Parent POM</name>
+    <description>Parent POM for Firefly OpenPlatform modules. Extends fireflyframework-parent and centralises the Firefly Framework BOM version. Modules cover shared capabilities and the banking, lending, and insurance industries.</description>
+    <url>https://openplatform.fireflysoftware.io</url>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <name>Firefly Software Foundation</name>
+            <email>dev@fireflysoftware.io</email>
+            <organization>Firefly Software Foundation</organization>
+            <organizationUrl>https://fireflysoftware.io</organizationUrl>
+        </developer>
+    </developers>
+    <scm child.scm.connection.inherit.append.path="false" child.scm.developerConnection.inherit.append.path="false" child.scm.url.inherit.append.path="false">
+        <connection>scm:git:https://github.com/fireflysoftwaresolutions/${openplatform.repository}.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/fireflysoftwaresolutions/${openplatform.repository}.git</developerConnection>
+        <url>https://github.com/fireflysoftwaresolutions/${openplatform.repository}</url>
+    </scm>
+
+    <properties>
+        <!-- Firefly Framework BOM version (single source of truth) -->
+        <fireflyframework.bom.version>26.10.20</fireflyframework.bom.version>
+
+        <!-- Firefly project conventions -->
+        <openplatform.repository>${project.artifactId}</openplatform.repository>
+        <base.package>io.fireflysoftware</base.package>
+        <openapi.base.package>${base.package}.${project.artifactId}</openapi.base.package>
+        <openapi.model.package>${openapi.base.package}.interfaces.dto</openapi.model.package>
+        <openapi.api.package>${openapi.base.package}.interfaces.api</openapi.api.package>
+        <openapi.skip.validate>false</openapi.skip.validate>
+        <openapi.use.tags>true</openapi.use.tags>
+        <openapi.use.optional>true</openapi.use.optional>
+        <openapi.date.library>java8</openapi.date.library>
+
+        <!-- OpenAPI generation: skipped by default. Set to false in -web modules to enable. -->
+        <openapi.gen.skip>true</openapi.gen.skip>
+        <openapi.gen.outputDir>${project.parent.basedir}/${project.parent.artifactId}-sdk/src/main/resources</openapi.gen.outputDir>
+
+        <!-- Container image build (Paketo Buildpacks). Activated via -Pbuild-image. -->
+        <docker.image.prefix>ghcr.io/firefly-oss</docker.image.prefix>
+        <docker.image.platform>linux/arm64</docker.image.platform>
+
+        <!-- OCI source label. Set to https://github.com/{owner}/{repo} from CI to
+             auto-link the GHCR package to its source repo. Empty by default so
+             local builds don't fail. -->
+        <oci.source/>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Firefly Framework BOM — pins all org.fireflyframework artifact versions -->
+            <dependency>
+                <groupId>org.fireflyframework</groupId>
+                <artifactId>fireflyframework-bom</artifactId>
+                <version>${fireflyframework.bom.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- Firefly Platform BOM — pins all io.fireflysoftware artifact versions -->
+            <dependency>
+                <groupId>io.fireflysoftware</groupId>
+                <artifactId>firefly-bom</artifactId>
+                <version>26.10.6</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <profiles>
+        <!--
+          Optional GitHub Packages mirror when Maven Central is unreachable.
+          Activate with -Pjafly-packages. Requires a PAT with read:packages in
+          settings.xml server id firefly-github (or CI GITHUB_TOKEN).
+          Prefer Central for 26.10.20+; leave this profile off by default.
+        -->
+        <profile>
+            <id>jafly-packages</id>
+            <repositories>
+                <repository>
+                    <!-- Server id firefly-github — match Maven settings credentials -->
+                    <id>firefly-github</id>
+                    <url>https://maven.pkg.github.com/fireflyframework/fireflyframework-jafly</url>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                    </snapshots>
+                </repository>
+            </repositories>
+            <pluginRepositories>
+                <pluginRepository>
+                    <id>firefly-github</id>
+                    <url>https://maven.pkg.github.com/fireflyframework/fireflyframework-jafly</url>
+                    <releases>
+                        <enabled>true</enabled>
+                    </releases>
+                    <snapshots>
+                        <enabled>true</enabled>
+                    </snapshots>
+                </pluginRepository>
+            </pluginRepositories>
+        </profile>
+
+        <!--
+            Container image build profile (Paketo Buildpacks).
+            Activated explicitly with -Pbuild-image. Inactive by default.
+            Each -web module inherits the spring-boot-maven-plugin configuration.
+        -->
+        <profile>
+            <id>build-image</id>
+            <build>
+                <pluginManagement>
+                    <plugins>
+                        <plugin>
+                            <groupId>org.springframework.boot</groupId>
+                            <artifactId>spring-boot-maven-plugin</artifactId>
+                            <configuration>
+                                <image>
+                                    <builder>paketobuildpacks/builder-noble-java-tiny</builder>
+                                    <name>${docker.image.prefix}/${project.artifactId}:${project.version}</name>
+                                    <imagePlatform>${docker.image.platform}</imagePlatform>
+                                    <env>
+                                        <BP_JVM_VERSION>25</BP_JVM_VERSION>
+                                        <BP_OCI_SOURCE>${oci.source}</BP_OCI_SOURCE>
+                                    </env>
+                                    <tags>
+                                        <tag>${docker.image.prefix}/${project.artifactId}:latest</tag>
+                                    </tags>
+                                </image>
+                            </configuration>
+                        </plugin>
+                    </plugins>
+                </pluginManagement>
+            </build>
+        </profile>
+
+        <!--
+            Shared OpenAPI generation profile.
+            Always active unless -DskipOpenApiGen is passed.
+            Plugin executions are controlled by openapi.gen.skip (true by default).
+            Each -web module sets openapi.gen.skip=false and openapi.gen.mainClass.
+        -->
+        <profile>
+            <id>generate-openapi</id>
+            <activation>
+                <property>
+                    <name>!skipOpenApiGen</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <!-- Start the lightweight OpenApiGenApplication to expose the spec -->
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>openapi-start</id>
+                                <phase>pre-integration-test</phase>
+                                <goals>
+                                    <goal>start</goal>
+                                </goals>
+                                <configuration>
+                                    <skip>${openapi.gen.skip}</skip>
+                                    <mainClass>${openapi.gen.mainClass}</mainClass>
+                                    <useTestClasspath>true</useTestClasspath>
+                                    <additionalClasspathElements>
+                                        <additionalClasspathElement>${project.build.testOutputDirectory}</additionalClasspathElement>
+                                    </additionalClasspathElements>
+                                    <profiles>
+                                        <profile>openapi-gen</profile>
+                                    </profiles>
+                                    <arguments>
+                                        <argument>--server.port=18080</argument>
+                                    </arguments>
+                                    <jvmArguments>--add-opens java.base/java.lang=ALL-UNNAMED</jvmArguments>
+                                </configuration>
+                            </execution>
+                            <execution>
+                                <id>openapi-stop</id>
+                                <phase>post-integration-test</phase>
+                                <goals>
+                                    <goal>stop</goal>
+                                </goals>
+                                <configuration>
+                                    <skip>${openapi.gen.skip}</skip>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!-- Fetch the OpenAPI spec from the running app and write it to the SDK module resources -->
+                    <plugin>
+                        <groupId>org.springdoc</groupId>
+                        <artifactId>springdoc-openapi-maven-plugin</artifactId>
+                        <version>1.4</version>
+                        <executions>
+                            <execution>
+                                <id>generate-openapi-spec</id>
+                                <phase>integration-test</phase>
+                                <goals>
+                                    <goal>generate</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <skip>${openapi.gen.skip}</skip>
+                            <apiDocsUrl>http://localhost:18080/v3/api-docs.yaml</apiDocsUrl>
+                            <outputDir>${openapi.gen.outputDir}</outputDir>
+                            <outputFileName>openapi.yml</outputFileName>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Sources and javadoc jars required by Maven Central. Inactive unless -Prelease. -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>flatten-maven-plugin</artifactId>
+                        <version>1.7.0</version>
+                        <configuration>
+                            <flattenMode>resolveCiFriendliesOnly</flattenMode>
+                            <updatePomFile>true</updatePomFile>
+                            <pomElements>
+                                <dependencies>resolve</dependencies>
+                            </pomElements>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>flatten</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>flatten</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.4.0</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.12.0</version>
+                        <configuration>
+                            <doclint>none</doclint>
+                            <failOnError>false</failOnError>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Central Portal publish. Activate with -Pmaven-central after the namespace is verified. -->
+        <profile>
+            <id>maven-central</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                                <configuration>
+                                    <gpgArguments>
+                                        <arg>--pinentry-mode</arg>
+                                        <arg>loopback</arg>
+                                    </gpgArguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.12.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
+                            <waitMaxTime>3600</waitMaxTime>
+                            <checksums>required</checksums>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
+</project>

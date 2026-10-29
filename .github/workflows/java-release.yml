@@ -4,260 +4,114 @@ on:
   workflow_call:
     inputs:
       java-version:
-        description: 'Java version to use'
-        required: false
+        description: JDK for the normal release validation build
         type: string
         default: '25'
+      release-tag:
+        description: Existing immutable vYY.MM.Patch tag at the exact caller source SHA
+        required: true
+        type: string
+      release-policy:
+        description: Reviewed repository policy JSON tracked at the release tag
+        required: true
+        type: string
+      destination:
+        description: github, central, or both; every selected destination must verify
+        type: string
+        default: github
+      dry-run:
+        description: Validate and freeze artifacts without publishing or creating a release
+        type: boolean
+        default: true
       deploy-module:
-        description: 'Specific module to deploy (e.g. core-banking-accounts-sdk). Leave empty to deploy the whole project.'
-        required: false
+        description: Legacy selector; nonempty values are refused; use the full policy artifact set
         type: string
         default: ''
       deploy-modules:
-        description: 'Comma-separated Maven -pl list. Skips the aggregator. Use when the aggregator POM is already on Central.'
-        required: false
+        description: Legacy selector; nonempty values are refused; use the full policy artifact set
         type: string
         default: ''
-      destination:
-        description: 'github, central, or both. both publishes GitHub Packages and then Maven Central in this same run.'
-        required: false
-        type: string
-        default: github
+
+permissions:
+  contents: read
 
 jobs:
-  github-packages:
+  release:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: write
+      packages: write
     concurrency:
-      group: release-${{ github.repository }}-${{ github.ref }}
+      group: release-${{ github.repository }}-${{ inputs.release-tag }}
       cancel-in-progress: false
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up JDK ${{ inputs.java-version }}
-        uses: actions/setup-java@v4
+      - name: Require immutable reusable workflow identity
+        id: tools
+        env:
+          JOB_CONTEXT: ${{ toJSON(job) }}
+          LEGACY_MODULE: ${{ inputs.deploy-module }}
+          LEGACY_MODULES: ${{ inputs.deploy-modules }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re
+          job = json.loads(os.environ['JOB_CONTEXT'])
+          sha = job.get('workflow_sha', '')
+          expected = 'fireflysoftwaresolutions/.github/.github/workflows/java-release.yml@' + sha
+          if (not re.fullmatch('[0-9a-f]{40}', sha) or job.get('workflow_ref') != expected
+              or os.environ['LEGACY_MODULE'] or os.environ['LEGACY_MODULES']):
+              raise SystemExit('Immutable workflow SHA and complete artifact-set migration required')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('sha=' + sha + '\n')
+          PY
+      - name: Checkout exact caller source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact reusable workflow tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: fireflysoftwaresolutions/.github
+          ref: ${{ steps.tools.outputs.sha }}
+          path: release-tools
+          persist-credentials: false
+      - name: Set up JDK
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
         with:
           java-version: ${{ inputs.java-version }}
           distribution: temurin
-          cache: maven
-
-      # Public platform POMs. Installed locally so a 401 from GitHub Packages
-      # cannot abort resolution. Jafly 26.10.20+ is on Maven Central.
-      - name: Checkout firefly-bom
-        if: github.repository != 'fireflysoftwaresolutions/firefly-bom'
-        uses: actions/checkout@v4
-        with:
-          repository: fireflysoftwaresolutions/firefly-bom
-          ref: main
-          path: .ci/firefly-bom
-
-      - name: Checkout firefly-parent
-        if: github.repository != 'fireflysoftwaresolutions/firefly-parent' && github.repository != 'fireflysoftwaresolutions/firefly-bom'
-        uses: actions/checkout@v4
-        with:
-          repository: fireflysoftwaresolutions/firefly-parent
-          ref: main
-          path: .ci/firefly-parent
-
-      - name: Configure Maven repositories
-        run: |
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << 'EOF'
-          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-            <servers>
-              <server>
-                <id>github-firefly-oss</id>
-                <username>x-access-token</username>
-                <password>${env.GITHUB_TOKEN}</password>
-              </server>
-              <server>
-                <id>central</id>
-                <username>${env.SONATYPE_USERNAME}</username>
-                <password>${env.SONATYPE_PASSWORD}</password>
-              </server>
-            </servers>
-          </settings>
-          EOF
-
-      - name: Install platform POMs
-        if: github.repository != 'fireflysoftwaresolutions/firefly-bom'
-        run: |
-          set -euo pipefail
-          mvn -B -ntp -f .ci/firefly-bom/pom.xml install -DskipTests
-          if [ -f .ci/firefly-parent/pom.xml ]; then
-            mvn -B -ntp -N -f .ci/firefly-parent/pom.xml install -DskipTests
-          fi
+      - name: Validate cold source, freeze artifacts, and publish exact manifest
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-      # Sibling packages live in each repository's own GitHub Packages
-      # namespace. GITHUB_TOKEN cannot read them, so install the upstream
-      # reactors from source in dependency order. The order rules live in
-      # scripts/openplatform_release.py, which the train orchestrator uses too.
-      - name: Checkout release tools
-        if: github.repository != 'fireflysoftwaresolutions/firefly-bom' && github.repository != 'fireflysoftwaresolutions/firefly-parent'
-        uses: actions/checkout@v4
-        with:
-          repository: fireflysoftwaresolutions/.github
-          ref: main
-          path: .ci/platform-tools
-
-      - name: Install upstream Firefly modules from source
-        if: github.repository != 'fireflysoftwaresolutions/firefly-bom' && github.repository != 'fireflysoftwaresolutions/firefly-parent'
-        env:
+          RELEASE_TAG: ${{ inputs.release-tag }}
+          RELEASE_POLICY: ${{ inputs.release-policy }}
+          RELEASE_DESTINATION: ${{ inputs.destination }}
+          RELEASE_DRY_RUN: ${{ inputs.dry-run }}
+          RELEASE_WORKFLOW_SHA: ${{ steps.tools.outputs.sha }}
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 .ci/platform-tools/scripts/openplatform_release.py install-upstreams
-
-      - name: Import the foundation GPG key
-        if: inputs.destination == 'central' || inputs.destination == 'both'
-        run: |
-          echo "$GPG_PRIVATE_KEY" | base64 --decode | gpg --batch --import
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-
-      - name: Deploy
-        run: |
-          set -o pipefail
-          SKIP_FLAGS="-Dmaven.test.skip=true -DskipOpenApiGen"
-          case "$DESTINATION" in
-            github|central|both) ;;
-            *)
-              echo "::error::destination must be github, central, or both"
-              exit 1
-              ;;
-          esac
-
-          publish() {
-            local deploy_flags="$1"
-            local label="$2"
-            echo "Publishing to ${label}"
-            if [ -n "$DEPLOY_MODULES" ]; then
-              echo "Deploying selected modules: $DEPLOY_MODULES"
-              mvn -B -ntp -N install $SKIP_FLAGS
-              mvn -B -ntp deploy $SKIP_FLAGS -pl "$DEPLOY_MODULES" $deploy_flags \
-                2>&1 | tee /tmp/mvn-deploy.log || {
-                  if grep -Eq "status code: 409|HTTP Status: 409" /tmp/mvn-deploy.log; then
-                    echo "::warning::Artifact already exists (409)"
-                  else
-                    echo "::error::Deploy to ${label} failed"
-                    exit 1
-                  fi
-                }
-            elif [ -n "$DEPLOY_MODULE" ]; then
-              echo "Deploying aggregate pom + module: $DEPLOY_MODULE"
-              mvn -B -ntp install $SKIP_FLAGS -pl ":$DEPLOY_MODULE" -am
-              # Central flattens the aggregator and drops dependencyManagement.
-              # Keep reactor siblings on that deploy so their versions still resolve.
-              local reactor_flags=""
-              if [[ "$deploy_flags" == *maven-central* ]]; then
-                reactor_flags="-am"
-              fi
-              mvn -B -ntp deploy $SKIP_FLAGS -pl ".,:$DEPLOY_MODULE" $reactor_flags $deploy_flags \
-                2>&1 | tee /tmp/mvn-deploy.log || {
-                  if grep -Eq "status code: 409|HTTP Status: 409" /tmp/mvn-deploy.log && \
-                     [ -z "$(grep -i 'Failed to deploy' /tmp/mvn-deploy.log | grep -v '409' || true)" ]; then
-                    echo "::warning::Artifact already exists (409)"
-                  else
-                    echo "::error::Deploy to ${label} failed"
-                    exit 1
-                  fi
-                }
-            else
-              echo "Deploying entire project"
-              mvn -B -ntp deploy $SKIP_FLAGS $deploy_flags \
-                2>&1 | tee /tmp/mvn-deploy.log || {
-                  if grep -Eq "status code: 409|HTTP Status: 409" /tmp/mvn-deploy.log && \
-                     [ -z "$(grep -i 'Failed to deploy' /tmp/mvn-deploy.log | grep -v '409' || true)" ]; then
-                    echo "::warning::Artifact already exists (409)"
-                  else
-                    echo "::error::Deploy to ${label} failed"
-                    exit 1
-                  fi
-                }
-            fi
-          }
-
-          if [ "$DESTINATION" = "github" ] || [ "$DESTINATION" = "both" ]; then
-            publish "-DaltDeploymentRepository=github-firefly-oss::https://maven.pkg.github.com/${{ github.repository }}" "GitHub Packages"
-          fi
-          if [ "$DESTINATION" = "central" ] || [ "$DESTINATION" = "both" ]; then
-            publish "-Prelease,maven-central -Dopenplatform.repository=${{ github.event.repository.name }}" "Maven Central"
-          fi
-        env:
           GITHUB_TOKEN: ${{ github.token }}
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          DEPLOY_MODULES: ${{ inputs.deploy-modules }}
-          DEPLOY_MODULE: ${{ inputs.deploy-module }}
-          DESTINATION: ${{ inputs.destination }}
-
-  post-release:
-    needs: [github-packages]
-    if: always() && needs.github-packages.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Extract version
-        id: version
         run: |
-          VERSION=$(awk '
-            /<parent>/ {inside=1}
-            /<\/parent>/ {inside=0; next}
-            inside {next}
-            /<version>/ {
-              gsub(/.*<version>/, "")
-              gsub(/<\/version>.*/, "")
-              gsub(/^[ \t]+|[ \t]+$/, "")
-              if ($0 !~ /^\$\{/) { print; exit }
-            }
-          ' pom.xml)
-          if [ -z "$VERSION" ]; then
-            VERSION=$(awk '
-              /<parent>/,/<\/parent>/ {
-                if (/<version>/) {
-                  gsub(/.*<version>/, "")
-                  gsub(/<\/version>.*/, "")
-                  gsub(/^[ \t]+|[ \t]+$/, "")
-                  print
-                  exit
-                }
-              }
-            ' pom.xml)
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="v${{ steps.version.outputs.version }}"
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          sleep 2
-          for ATTEMPT in 1 2 3; do
-            if gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes \
-              --latest \
-              --target "${{ github.sha }}" 2>/dev/null; then
-              echo "Release $TAG created successfully"
-              exit 0
-            fi
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              echo "Release $TAG already exists — OK"
-              exit 0
-            fi
-            echo "Attempt $ATTEMPT failed, retrying in 3s..."
-            sleep 3
-          done
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists — OK"
-          else
-            echo "::warning::Could not create release $TAG after 3 attempts"
-          fi
+          set -euo pipefail
+          python3 release-tools/scripts/java_release.py --source source
+      - name: Retain validation manifest and receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/java-release-evidence/validation-state.json
+            ${{ runner.temp }}/java-release-evidence/validation-failure.json
+            ${{ runner.temp }}/java-release-evidence/release-manifest.json
+            ${{ runner.temp }}/java-release-evidence/publication-receipts.json
+            ${{ runner.temp }}/java-release-evidence/release-created.json
+          if-no-files-found: error

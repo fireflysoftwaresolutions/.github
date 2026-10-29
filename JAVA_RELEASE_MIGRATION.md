@@ -1,0 +1,56 @@
+# Java release workflow migration
+
+This reusable workflow intentionally refuses the old implicit release path. Adopt a reviewed immutable commit of `.github/workflows/java-release.yml`, with **the same full SHA in the caller's `uses:` reference**. GitHub.com's `job.workflow_*` context identifies the callee; unavailable or mutable identity fails. GitHub Enterprise Server requires a separately reviewed identity mechanism and is not supported by this change. Actions are pinned to the captured v4 commit SHAs.
+
+Required inputs are `release-tag` and `release-policy`. `destination` remains `github`, `central`, or `both`. `dry-run` defaults to `true`: it performs cold validation and freezes a manifest without publishing artifacts or creating a GitHub release. The existing tag must already resolve to the exact caller SHA. The workflow never creates, moves, deletes, or repairs a tag. Nonempty legacy `deploy-module`/`deploy-modules` inputs fail: complete reactor publication replaces partial SDK-only success.
+
+Versions follow **YY.MM.Patch**. Patch is an arbitrary nonnegative integer counter, not a date or day. `26.10.6`, `26.10.32`, `26.10.100`, `26.10.0`, and legacy `26.10.06` are accepted as exact strings. `v26.10.06` and `v26.10.6` are different tags. This workflow validates identity; it does not choose or reserve a version. Before dispatch, the coordinated release owner must review published artifacts, staging, reservations, and active source releases, select the next counter per component, and approve all applicable release gates. No version is selected by this source change.
+
+## Repository policy
+
+A JSON policy must be tracked in the exact tagged source. Missing policies fail before Maven runs. The schema is:
+
+- `schema`: `1`.
+- `kind`: `pom` or `service`. The `pom` exemption is allowed only when **every effective reactor project is POM packaging**.
+- `profiles`: explicit reviewed Maven profiles, possibly empty. There are no arbitrary Maven flags, goals, or source-bootstrap commands.
+- `suites`: exact JUnit suite names from both Surefire and Failsafe, with no duplicates.
+- `minimum_tests`: the reviewed lower bound for that repository, positive for services. Every observed testcase must pass; missing suites, failures, errors, or skips refuse release. No universal framework-specific test count is imposed.
+- `artifacts`: ordered list matching the entire effective Maven reactor. Each entry has `groupId`, `artifactId`, `version`, `packaging`, and `files`. `files` maps `.pom` to the actual publish POM; JAR projects additionally map `.jar`, `-sources.jar`, and `-javadoc.jar` to fresh files under their target tree. POM-only projects provide only `.pom`. Unsupported packaging or attachments require a reviewed adapter, not silent omission.
+- `verifier`: for services, the path of a repository-owned, tracked Python verifier. The verifier must be implemented and independently reviewed before adoption; no successful stub is supplied here.
+- `signing_fingerprint`: the complete reviewed 40-hex signing-key fingerprint for Central. Required only when selecting Central.
+
+The policy must describe actual module outputs and existing normal checks, not a guessed example artifact inventory. Effective GAVs come from `maven-help-plugin:3.5.1:effective-pom` in the **same** cold `clean verify` invocation. Every reactor version must equal the tag version. Parent, plugin, and dependency versions must be fixed releases; unresolved versions, snapshots, dynamic ranges, `LATEST`, and `RELEASE` refuse publication. Raw POM XML is never used as a version-selection heuristic.
+
+Maven uses a newly allocated empty local repository, explicit settings, and no restored dependency cache, sibling checkout, upstream source install, branch POM installation, or POM rewriting. Credentials allow only ordinary released dependency resolution and subsequent publication. A missing released dependency must fail the build. Nonempty `.mvn` launcher/extension configuration requires separate review and is currently refused. Inherited JVM/Maven override variables are removed. Known global test suppression (`skipTests`, `maven.test.skip`, `skipITs`) and any `skipOpenApiGen` flag are rejected, including `skipOpenApiGen=false` because property presence disables the original producer. Effective global test properties must be false, and `skipOpenApiGen` presence refuses. Module-local producer defaults such as inherited `openapi.gen.skip=true` on parent/non-web modules are interpreted by the reviewed repository verifier and producer lifecycle, rather than globally rejected. The web override, actual normal producer and Generator executions, and original SDK proof remain mandatory. Failed/missing/skipped test evidence refuses release.
+
+## Original producer and SDK gate
+
+`clean verify` must run the genuine existing owner lifecycle: the web test application starts in pre-integration-test, Springdoc captures the actual original routes in integration-test, the application stops in post-integration-test, and the original OpenAPI Generator consumes that freshly produced canonical spec in the dependent SDK module. The source policy reviewer must verify the effective reactor/dependency order and lifecycle bindings. No producer-disabling property is passed. A stored specification or a generated-looking source tree alone is insufficient.
+
+The service verifier is invoked after the normal build:
+
+```
+python3 <tracked verifier> --source-sha <exact SHA> --build-log <private normal-build log> --output <new proof path>
+```
+
+It must validate the actual producer and Generator executions, original discovery/profile, exact canonical spec, generated source/API/model inventory, packaged class/spec equalities, and relevant typed SDK compile proof for that repository. It must enforce its bounded producer ownership/cleanup contract and fail on absent, stale, or ambiguous output. The shared helper does **not** infer those facts from a command name, a parseable spec, or a boolean supplied by an unreviewed verifier. Current repositories without that verifier/policy remain blocked. Existing local producer evidence does not automatically qualify a new hosted invocation.
+
+The verifier's output is a bounded public provenance object containing exactly `source_sha`, `original_producer: true`, `original_generator: true`, nonempty identifier-only `producer_executions` and `generator_executions`, and nonempty `files` entries with relative `path` and `sha256`. The shared gate rehashes those files. Raw logs, classpaths, credentials, private runtime metadata, and arbitrary fields are not accepted into the public manifest. This schema is an interface for the reviewed verifier, not a supplied proof of generation.
+
+## Publication and failure handling
+
+After normal validation, all tracked source bytes must remain unchanged. Artifacts are copied to a separate frozen directory. Every primary JAR's embedded Maven coordinates must match its effective GAV. A manifest binds the repository, exact source SHA/tag, callee workflow SHA, policy, source hashes, effective POM, normal-build log hash, actual test evidence, original SDK proof, and complete artifact set. The selected destinations consume this manifest's exact frozen bytes; no second reactor build or version parse occurs during publication.
+
+All selected destinations are checked for existing component files before either is mutated. An existing artifact, ambiguous response, unauthorized lookup, conflict, missing dependency, or nonzero deployment fails. HTTP 409 is never success, even for identical bytes. GitHub uses only pinned Maven deploy-file against a neutral publisher POM, never the caller lifecycle. Central receives a signed repository-layout bundle built from the same primary POM/JAR/source/Javadoc files, with signature/checksum sidecars; it must reach `PUBLISHED`. Both destinations require complete byte-for-byte remote readback. The sidecar inventory is explicit in the manifest.
+
+Only after all requested destinations verify can the workflow create a new GitHub release at the already verified tag, attaching the exact manifest and pre-creation receipts. Existing releases fail; no delete, update, replacement, clobber, or warning-as-success path exists. Tag identity is read again before each destination and after release asset readback. This detects changes; it does not replace server-side tag protection or namespace approval.
+
+Cold build output is streamed to the workflow console, where GitHub applies its registered-secret masking. The exact raw build log is retained only in the private work directory with mode0600; effective XML and the verifier proof also stay in that private directory. On validation failure, `validation-failure.json` contains only a closed phase, original command exit code where present, error kind/hash, and optional build-log/effective-POM/SDK-proof hashes. It contains no exception message, raw log, XML, SDK proof or artifact bytes. The artifact uploader names only the five explicit JSON evidence paths; it never uploads the work directory. Failure metadata is bounded and the original nonzero command exit remains a failure, including exit9. Actual hosted secret masking and failure-artifact retention still need hosted qualification; offline controls do not establish those provider facts.
+
+If any destination partially publishes, preserve the run and its receipts. Do not overwrite artifacts, move tags, delete releases, or treat a rerun as success. The coordinated owner must investigate the partial state and select a reviewed forward version if needed. `both` is not a cross-registry atomic transaction. Validation/upload failures remain failures even if earlier immutable artifacts exist.
+
+## Qualification boundary
+
+This change is source-only. Offline Python controls, structured YAML, ShellCheck, and Actionlint can qualify its local policy/control flow. They do not qualify Maven resolution, normal repository suites, the original producer/Generator, registry transport, signing, tag/release creation, downloaded artifacts, or publication. Those gates require reviewed caller policies, concrete immutable versions, fresh hosted execution, and actual retained evidence. The separate train orchestrator remains unchanged and is **not** qualified by this workflow correction; its legacy source-bootstrap command is no longer reachable from this reusable workflow. Callers still using `@main` have not adopted the immutable workflow.
+
+Primary contracts: [GitHub callee job context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context), [immutable reusable workflow references](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows), [Maven effective POM](https://maven.apache.org/plugins/maven-help-plugin/usage.html), [Maven deploy-file](https://maven.apache.org/plugins/maven-deploy-plugin/deploy-file-mojo.html), and [Central bundle API](https://central.sonatype.org/publish/publish-portal-api/).
