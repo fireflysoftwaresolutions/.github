@@ -23,6 +23,15 @@ COORDINATE = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*\Z')
 SUPPRESSION = re.compile(r'skipTests|maven\.test\.skip|skipOpenApiGen|skipITs', re.I)
 GLOBAL_TEST_PROPERTIES = {'skiptests', 'maven.test.skip', 'skipits'}
 NS = '{http://maven.apache.org/POM/4.0.0}'
+COORDINATE_VERSION_PATHS = (
+    'version', 'parent/version', 'dependencies/dependency/version',
+    'dependencyManagement/dependencies/dependency/version',
+    'build/extensions/extension/version', 'build/plugins/plugin/version',
+    'build/plugins/plugin/dependencies/dependency/version',
+    'build/pluginManagement/plugins/plugin/version',
+    'build/pluginManagement/plugins/plugin/dependencies/dependency/version',
+    'reporting/plugins/plugin/version', 'distributionManagement/relocation/version',
+)
 
 
 def command(args, stream_console=False, **kwargs):
@@ -97,14 +106,16 @@ def no_suppression(text):
 def effective_projects(path):
     tree = ET.parse(path).getroot()
     projects = [tree] if tree.tag in ('project', NS + 'project') else list(tree)
-    for node in tree.iter():
-        if node.tag.split('}')[-1] == 'version':
-            text = (node.text or '').strip()
-            if not text or 'SNAPSHOT' in text.upper() or text.upper() in ('LATEST', 'RELEASE') or any(c in text for c in '${}[],()'):
-                raise ValueError('Only fixed released dependency and plugin versions are accepted')
     result = []
     for project in projects:
         ns = NS if project.tag.startswith(NS) else ''
+        # Enforcer Java/Maven requirement ranges are configuration, not artifact versions.
+        for model in [project, *project.findall(ns + 'profiles/' + ns + 'profile')]:
+            for path in COORDINATE_VERSION_PATHS:
+                for node in model.findall('/'.join(ns + part for part in path.split('/'))):
+                    text = (node.text or '').strip()
+                    if not text or 'SNAPSHOT' in text.upper() or text.upper() in ('LATEST', 'RELEASE') or any(c in text for c in '${}[],()'):
+                        raise ValueError('Only fixed released dependency and plugin versions are accepted')
         row = {key: (project.findtext(ns + key) or '').strip() for key in ('groupId', 'artifactId', 'version')}
         if not all(COORDINATE.fullmatch(row[key]) for key in ('groupId', 'artifactId')):
             raise ValueError('Unresolved effective project coordinates')
